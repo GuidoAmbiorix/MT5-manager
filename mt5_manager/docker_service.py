@@ -70,8 +70,9 @@ class DockerService:
                 },
                 environment={
                     "CUSTOM_USER": "trader",
-                    "PASSWORD": password,
-                    "VNCPASSWORD": password
+                    "PASSWORD": "",
+                    "VNCPASSWORD": "",
+                    "VNC_DISABLE_AUTH": "true"
                 },
                 volumes={
                     volume_name: {'bind': '/config', 'mode': 'rw'}
