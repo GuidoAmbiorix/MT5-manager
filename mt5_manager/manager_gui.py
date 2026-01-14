@@ -7,6 +7,81 @@ from docker_service import DockerService
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
+class LogViewerWindow(ctk.CTkToplevel):
+    def __init__(self, master, docker_service, container_id, container_name):
+        super().__init__(master)
+        
+        self.docker_service = docker_service
+        self.container_id = container_id
+        self.container_name = container_name
+        self.current_log_type = "experts" # Default
+        
+        self.title(f"Logs: {container_name}")
+        self.geometry("900x600")
+        
+        # Layout
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        
+        # Header Frame
+        self.header = ctk.CTkFrame(self)
+        self.header.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        # Log Type Selector
+        self.type_seg = ctk.CTkSegmentedButton(self.header, values=["Experts", "Journal"], command=self._on_type_change)
+        self.type_seg.pack(side="left", padx=10)
+        self.type_seg.set("Experts")
+        
+        # File Dropdown
+        self.file_combo = ctk.CTkComboBox(self.header, width=200, command=self._on_file_change)
+        self.file_combo.pack(side="left", padx=10)
+        
+        # Refresh Button
+        self.btn_refresh = ctk.CTkButton(self.header, text="Refresh", width=80, command=self._load_file_list)
+        self.btn_refresh.pack(side="right", padx=10)
+
+        # Content Area
+        self.text_area = ctk.CTkTextbox(self, font=("Consolas", 12))
+        self.text_area.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        
+        # Load initial data
+        self._load_file_list()
+
+    def _on_type_change(self, value):
+        self.current_log_type = value.lower()
+        self._load_file_list()
+
+    def _load_file_list(self):
+        # Fetch files in background thread? Or sync for simplicity first. 
+        # The docker call is fast enough usually.
+        files = self.docker_service.get_log_list(self.container_id, self.current_log_type)
+        
+        if files:
+            self.file_combo.configure(values=files)
+            self.file_combo.set(files[0])
+            self._on_file_change(files[0]) # Load content of first file
+        else:
+            self.file_combo.configure(values=["No logs found"])
+            self.file_combo.set("No logs found")
+            self.text_area.delete("1.0", "end")
+            self.text_area.insert("1.0", f"No {self.current_log_type} logs found.")
+
+    def _on_file_change(self, filename):
+        if filename == "No logs found":
+            return
+            
+        threading.Thread(target=self._load_content_thread, args=(filename,)).start()
+
+    def _load_content_thread(self, filename):
+        content = self.docker_service.read_log_content(self.container_id, self.current_log_type, filename)
+        self.after(0, lambda: self._update_text_area(content))
+
+    def _update_text_area(self, content):
+        self.text_area.delete("1.0", "end")
+        self.text_area.insert("1.0", content)
+        self.text_area.see("end") # Scroll to bottom by default
+
+
 class MT5ManagerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -114,6 +189,11 @@ class MT5ManagerApp(ctk.CTk):
                                       command=lambda p=c['vnc_port']: webbrowser.open(f"http://localhost:{p}"))
                 btn_vnc.pack(side="right", padx=5, pady=5)
             
+            btn_logs = ctk.CTkButton(row, text="Logs", width=80, height=25, fg_color="#555", hover_color="#444",
+                                       command=lambda cid=c['id'], cname=c['name']: self.open_logs_window(cid, cname))
+            btn_logs.pack(side="right", padx=5)
+
+            
             btn_del = ctk.CTkButton(row, text="X", width=30, height=25, fg_color="red", hover_color="darkred",
                                     command=lambda cid=c['id']: self.delete_container(cid))
             btn_del.pack(side="right", padx=5)
@@ -138,6 +218,13 @@ class MT5ManagerApp(ctk.CTk):
             self.after(0, lambda: messagebox.showerror("Error", err))
         else:
             self.after(0, self.refresh_list)
+
+    def open_logs_window(self, container_id, container_name):
+        # Prevent opening multiple windows for same container? 
+        # For now, just open a new one. User has control.
+        # pass docker_service instance
+        LogViewerWindow(self, self.docker_service, container_id, container_name)
+
 
     def delete_container(self, container_id):
         if messagebox.askyesno("Confirm", "Delete this instance?"):

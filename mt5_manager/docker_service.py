@@ -151,6 +151,89 @@ class DockerService:
                 errors.append(f"Failed to kill {c['name']}: {e}")
         return errors
 
+    def get_log_list(self, container_id: str, log_type: str) -> List[str]:
+        """
+        Lists log files for a given type.
+        log_type: 'experts' or 'journal'
+        """
+        if not self.client:
+            return []
+
+        try:
+            container = self.client.containers.get(container_id)
+            
+            # Determine path based on type
+            # Experts: /config/MQL5/Logs/
+            # Journal: /config/Logs/
+            if log_type == 'experts':
+                path = "/config/MQL5/Logs/"
+            elif log_type == 'journal':
+                path = "/config/Logs/"
+            else:
+                return []
+            
+            # Execute ls command
+            cmd = f"ls -1 {path}"
+            result = container.exec_run(cmd)
+            
+            if result.exit_code != 0:
+                print(f"Error listing logs: {result.output.decode('utf-8')}")
+                return []
+                
+            files = result.output.decode('utf-8').splitlines()
+            # Filter for .log files and sort descending (newest first)
+            log_files = [f for f in files if f.endswith('.log')]
+            log_files.sort(reverse=True)
+            
+            return log_files
+
+        except Exception as e:
+            print(f"Error getting log list: {e}")
+            return []
+
+    def read_log_content(self, container_id: str, log_type: str, filename: str) -> Optional[str]:
+        """Reads the content of a specific log file."""
+        if not self.client:
+            return "Docker client not connected"
+
+        try:
+            container = self.client.containers.get(container_id)
+            
+            if log_type == 'experts':
+                path = f"/config/MQL5/Logs/{filename}"
+            elif log_type == 'journal':
+                path = f"/config/Logs/{filename}"
+            else:
+                return "Invalid log type"
+            
+            # Read file using cat
+            # output is bytes
+            cmd = f"cat {path}"
+            result = container.exec_run(cmd)
+             
+            if result.exit_code != 0:
+                return f"Error reading file: {result.output.decode('utf-8', errors='ignore')}"
+            
+            # MT5 logs are typically UTF-16 LE, but sometimes they might be simple ASCII/UTF-8 depending on wine/linux Setup.
+            # However, standard MT5 on Windows writes UTF-16.
+            # Let's try attempting to decode as utf-16 first, then utf-8.
+            raw_data = result.output
+            
+            try:
+                # Try UTF-16 first (common for MT5)
+                # UTF-16 logs often start with BOM \xff\xfe
+                content = raw_data.decode('utf-16')
+            except UnicodeDecodeError:
+                try:
+                    content = raw_data.decode('utf-8')
+                except UnicodeDecodeError:
+                    content = raw_data.decode('utf-8', errors='replace')
+            
+            return content
+
+        except Exception as e:
+            return f"Error reading log content: {e}"
+
     def get_next_available_ports(self, start_vnc=3000, start_api=8001) -> tuple[int, int]:
         """Calculates the next available ports based on existing containers."""
         containers = self.list_mt5_containers()
@@ -175,3 +258,4 @@ class DockerService:
             api += 1
             
         return vnc, api
+
