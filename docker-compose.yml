@@ -124,7 +124,7 @@ services:
     build: ./mt5_manager
     container_name: trading_mt5_manager
     ports:
-      - "5800:5800"
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock # Access to host Docker
       - ./mt5_manager:/app # Development mode
