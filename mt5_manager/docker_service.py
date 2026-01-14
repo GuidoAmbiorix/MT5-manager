@@ -151,6 +151,122 @@ class DockerService:
                 errors.append(f"Failed to kill {c['name']}: {e}")
         return errors
 
+    def stop_container(self, container_id: str) -> Optional[str]:
+        """Stops a running container gracefully."""
+        if not self.client:
+            return "Docker client not connected"
+        
+        try:
+            container = self.client.containers.get(container_id)
+            container.stop(timeout=30)
+            return None
+        except Exception as e:
+            return f"Error stopping container: {e}"
+
+    def start_container(self, container_id: str) -> Optional[str]:
+        """Starts a stopped container."""
+        if not self.client:
+            return "Docker client not connected"
+        
+        try:
+            container = self.client.containers.get(container_id)
+            container.start()
+            return None
+        except Exception as e:
+            return f"Error starting container: {e}"
+
+    def restart_container(self, container_id: str) -> Optional[str]:
+        """Restarts a container."""
+        if not self.client:
+            return "Docker client not connected"
+        
+        try:
+            container = self.client.containers.get(container_id)
+            container.restart(timeout=30)
+            return None
+        except Exception as e:
+            return f"Error restarting container: {e}"
+
+    def get_container_stats(self, container_id: str) -> Dict:
+        """Returns CPU%, Memory usage, and Uptime for a container."""
+        if not self.client:
+            return {"error": "Docker client not connected"}
+        
+        try:
+            container = self.client.containers.get(container_id)
+            
+            # Get container info for uptime
+            info = container.attrs
+            started_at = info.get('State', {}).get('StartedAt', '')
+            
+            # Calculate uptime
+            uptime_str = "N/A"
+            if started_at and container.status == 'running':
+                from datetime import datetime, timezone
+                # Parse ISO format with timezone
+                started_at = started_at.replace('Z', '+00:00')
+                try:
+                    start_time = datetime.fromisoformat(started_at[:26] + '+00:00')
+                    now = datetime.now(timezone.utc)
+                    delta = now - start_time
+                    
+                    days = delta.days
+                    hours, remainder = divmod(delta.seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    
+                    if days > 0:
+                        uptime_str = f"{days}d {hours}h"
+                    elif hours > 0:
+                        uptime_str = f"{hours}h {minutes}m"
+                    else:
+                        uptime_str = f"{minutes}m"
+                except:
+                    uptime_str = "N/A"
+            
+            # Get stats (non-streaming for quick snapshot)
+            if container.status != 'running':
+                return {
+                    "cpu_percent": 0.0,
+                    "memory_mb": 0,
+                    "memory_percent": 0.0,
+                    "uptime": "Stopped"
+                }
+            
+            stats = container.stats(stream=False)
+            
+            # Calculate CPU percentage
+            cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
+                       stats['precpu_stats']['cpu_usage']['total_usage']
+            system_delta = stats['cpu_stats']['system_cpu_usage'] - \
+                          stats['precpu_stats']['system_cpu_usage']
+            
+            cpu_percent = 0.0
+            if system_delta > 0:
+                num_cpus = stats['cpu_stats'].get('online_cpus', 1) or 1
+                cpu_percent = (cpu_delta / system_delta) * num_cpus * 100.0
+            
+            # Calculate memory
+            memory_usage = stats['memory_stats'].get('usage', 0)
+            memory_limit = stats['memory_stats'].get('limit', 1)
+            memory_mb = memory_usage / (1024 * 1024)
+            memory_percent = (memory_usage / memory_limit) * 100.0 if memory_limit > 0 else 0
+            
+            return {
+                "cpu_percent": round(cpu_percent, 1),
+                "memory_mb": round(memory_mb, 0),
+                "memory_percent": round(memory_percent, 1),
+                "uptime": uptime_str
+            }
+            
+        except Exception as e:
+            return {
+                "cpu_percent": 0.0,
+                "memory_mb": 0,
+                "memory_percent": 0.0,
+                "uptime": "Error",
+                "error": str(e)
+            }
+
     def get_log_list(self, container_id: str, log_type: str) -> List[str]:
         """
         Lists log files for a given type.

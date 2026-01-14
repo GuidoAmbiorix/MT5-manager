@@ -1,5 +1,6 @@
 from nicegui import ui, app
 from docker_service import DockerService
+from mt5_api_service import mt5_api
 import asyncio
 from datetime import datetime
 
@@ -12,6 +13,7 @@ docker_service = DockerService()
 # --- State ---
 containers = []
 is_loading = False
+docker_connected = docker_service.client is not None
 
 # --- Custom Styles ---
 ui.add_head_html('''
@@ -91,14 +93,26 @@ ui.add_head_html('''
 
 async def refresh_containers():
     """Fetches container list and updates the grid."""
-    global containers, is_loading
+    global containers, is_loading, docker_connected
     is_loading = True
+    
+    # Re-check Docker connection
+    docker_connected = docker_service.client is not None
+    
+    if not docker_connected:
+        is_loading = False
+        container_grid.clear()
+        with container_grid:
+            create_docker_error_state()
+        update_stats()
+        return
     
     try:
         containers = await asyncio.to_thread(docker_service.list_mt5_containers)
     except Exception as e:
         ui.notify(f"Error fetching containers: {e}", type='negative', position='top')
         containers = []
+        docker_connected = False
     finally:
         is_loading = False
     
@@ -116,6 +130,22 @@ async def refresh_containers():
     with container_grid:
         for i, c in enumerate(containers):
             create_container_card(c, i)
+
+def create_docker_error_state():
+    """Creates an error state UI when Docker is not connected."""
+    with ui.column().classes("w-full items-center justify-center py-20 col-span-full"):
+        ui.icon("cloud_off").classes("text-red-500 text-8xl mb-4 opacity-70")
+        ui.label("Docker Not Connected").classes("text-2xl text-red-400 font-bold mb-2")
+        ui.label("Unable to connect to Docker daemon. Please ensure Docker is running.").classes("text-slate-400 mb-6 text-center")
+        
+        with ui.card().classes("bg-slate-700/30 border border-slate-600 p-4 mb-6"):
+            ui.label("Troubleshooting:").classes("text-sm text-slate-300 font-medium mb-2")
+            with ui.column().classes("text-sm text-slate-400 gap-1"):
+                ui.label("• Check if Docker Desktop is running")
+                ui.label("• Verify Docker socket is accessible")
+                ui.label("• Restart the MT5 Manager container")
+        
+        ui.button("Retry Connection", icon="refresh", on_click=refresh_containers).props("color=blue size=lg")
 
 def update_stats():
     """Update statistics cards."""
@@ -214,19 +244,32 @@ def create_container_card(c, index):
                     ui.label("API Port").classes("text-xs text-slate-400 font-medium uppercase tracking-wide")
                 ui.label(c['api_port']).classes("text-purple-400 font-mono text-sm font-semibold")
 
-        # Quick Stats
-        with ui.row().classes("w-full gap-2 mb-4"):
+        # Quick Stats - Will be updated asynchronously
+        with ui.row().classes("w-full gap-2 mb-4") as stats_row:
             with ui.card().classes("bg-slate-700/30 flex-1 p-2 border border-slate-600/30"):
                 ui.label("CPU").classes("text-xs text-slate-400")
-                ui.label("12%").classes("text-sm text-cyan-400 font-semibold")
+                cpu_label = ui.label("--").classes("text-sm text-cyan-400 font-semibold")
             
             with ui.card().classes("bg-slate-700/30 flex-1 p-2 border border-slate-600/30"):
                 ui.label("Memory").classes("text-xs text-slate-400")
-                ui.label("256MB").classes("text-sm text-green-400 font-semibold")
+                mem_label = ui.label("--").classes("text-sm text-green-400 font-semibold")
             
             with ui.card().classes("bg-slate-700/30 flex-1 p-2 border border-slate-600/30"):
                 ui.label("Uptime").classes("text-xs text-slate-400")
-                ui.label("2h 45m").classes("text-sm text-blue-400 font-semibold")
+                uptime_label = ui.label("--").classes("text-sm text-blue-400 font-semibold")
+        
+        # Async stats loader
+        async def load_stats():
+            try:
+                stats = await asyncio.to_thread(docker_service.get_container_stats, c['id'])
+                cpu_label.set_text(f"{stats.get('cpu_percent', 0)}%")
+                mem_label.set_text(f"{int(stats.get('memory_mb', 0))}MB")
+                uptime_label.set_text(stats.get('uptime', 'N/A'))
+            except:
+                pass
+        
+        # Trigger async load after render
+        ui.timer(0.1, load_stats, once=True)
 
         ui.separator().classes("bg-slate-700/50 my-3")
 
@@ -235,6 +278,10 @@ def create_container_card(c, index):
             # Left actions
             with ui.row().classes("gap-1"):
                 ui.button(icon="description", on_click=lambda cid=c['id'], name=c['name']: open_logs(cid, name)).props("round flat size=sm").classes("text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition-all").tooltip("View Logs")
+                
+                # Trading button - opens trading drawer
+                if c['api_port'] != "N/A":
+                    ui.button(icon="candlestick_chart", on_click=lambda cid=c['id'], name=c['name'], port=c['api_port']: open_trading(cid, name, port)).props("round flat size=sm").classes("text-slate-400 hover:text-yellow-400 hover:bg-yellow-500/10 transition-all").tooltip("Trading Info")
                 
                 if c['vnc_port'] != "N/A":
                     ui.button(icon="monitor", on_click=lambda p=c['vnc_port']: ui.open(f"http://localhost:{p}", new_tab=True)).props("round flat size=sm").classes("text-slate-400 hover:text-green-400 hover:bg-green-500/10 transition-all").tooltip("Open VNC")
@@ -332,18 +379,33 @@ async def delete_instance(container_id, container_name):
     dialog.open()
 
 async def stop_instance(container_id):
-    ui.notify("Stopping instance...", type='info', position='top')
-    # Implementation here
+    ui.notify("Stopping instance...", type='info', position='top', spinner=True, timeout=0)
+    err = await asyncio.to_thread(docker_service.stop_container, container_id)
+    ui.notify(None)
+    if err:
+        ui.notify(f"Error: {err}", type='negative', position='top', timeout=5000)
+    else:
+        ui.notify("Instance stopped", type='positive', position='top', timeout=3000)
     await refresh_containers()
 
 async def start_instance(container_id):
-    ui.notify("Starting instance...", type='info', position='top')
-    # Implementation here
+    ui.notify("Starting instance...", type='info', position='top', spinner=True, timeout=0)
+    err = await asyncio.to_thread(docker_service.start_container, container_id)
+    ui.notify(None)
+    if err:
+        ui.notify(f"Error: {err}", type='negative', position='top', timeout=5000)
+    else:
+        ui.notify("Instance started", type='positive', position='top', timeout=3000)
     await refresh_containers()
 
 async def restart_instance(container_id):
-    ui.notify("Restarting instance...", type='info', position='top')
-    # Implementation here
+    ui.notify("Restarting instance...", type='info', position='top', spinner=True, timeout=0)
+    err = await asyncio.to_thread(docker_service.restart_container, container_id)
+    ui.notify(None)
+    if err:
+        ui.notify(f"Error: {err}", type='negative', position='top', timeout=5000)
+    else:
+        ui.notify("Instance restarted", type='positive', position='top', timeout=3000)
     await refresh_containers()
 
 async def open_logs(container_id, container_name):
@@ -394,6 +456,176 @@ async def open_logs(container_id, container_name):
         file_select.on_value_change(load_content)
         
         await refresh_files()
+
+async def open_trading(container_id, container_name, api_port):
+    """Opens trading drawer with account info, positions, and history."""
+    trading_drawer.clear()
+    trading_drawer.open()
+    
+    with trading_drawer:
+        # Header
+        with ui.row().classes("w-full items-center justify-between mb-6"):
+            with ui.row().classes("items-center gap-3"):
+                ui.icon("candlestick_chart").classes("text-yellow-400 text-2xl")
+                with ui.column().classes("gap-0"):
+                    ui.label("Trading Dashboard").classes("text-xl font-bold text-slate-100")
+                    ui.label(container_name).classes("text-sm text-slate-400")
+            ui.button(icon="close", on_click=trading_drawer.close).props("flat round").classes("text-slate-400")
+        
+        ui.separator().classes("bg-slate-700 mb-4")
+        
+        # Tabs
+        with ui.tabs().classes("w-full") as tabs:
+            account_tab = ui.tab("Account", icon="account_balance")
+            positions_tab = ui.tab("Positions", icon="trending_up")
+            history_tab = ui.tab("History", icon="history")
+        
+        with ui.tab_panels(tabs, value=account_tab).classes("w-full"):
+            # Account Tab
+            with ui.tab_panel(account_tab):
+                account_content = ui.column().classes("w-full gap-4")
+                
+                async def load_account():
+                    account_content.clear()
+                    with account_content:
+                        ui.label("Loading account info...").classes("text-slate-400")
+                    
+                    result = await asyncio.to_thread(mt5_api.get_account_info, "localhost", api_port)
+                    
+                    account_content.clear()
+                    with account_content:
+                        if not result.get("success"):
+                            with ui.card().classes("bg-red-500/10 border border-red-500/30 w-full p-4"):
+                                ui.icon("error").classes("text-red-400 text-2xl")
+                                ui.label("Failed to connect to MT5 API").classes("text-red-400 font-medium")
+                                ui.label(result.get("error", "Unknown error")).classes("text-red-300 text-sm")
+                            return
+                        
+                        # Account Cards
+                        with ui.row().classes("w-full gap-3"):
+                            with ui.card().classes("glass-card flex-1 p-4"):
+                                ui.label("Balance").classes("text-xs text-slate-400 uppercase")
+                                ui.label(f"${result.get('balance', 0):,.2f}").classes("text-2xl font-bold text-green-400")
+                            
+                            with ui.card().classes("glass-card flex-1 p-4"):
+                                ui.label("Equity").classes("text-xs text-slate-400 uppercase")
+                                ui.label(f"${result.get('equity', 0):,.2f}").classes("text-2xl font-bold text-blue-400")
+                            
+                            with ui.card().classes("glass-card flex-1 p-4"):
+                                profit = result.get('profit', 0)
+                                color = "text-green-400" if profit >= 0 else "text-red-400"
+                                ui.label("Floating P/L").classes("text-xs text-slate-400 uppercase")
+                                ui.label(f"${profit:,.2f}").classes(f"text-2xl font-bold {color}")
+                        
+                        # Details
+                        with ui.card().classes("glass-card w-full p-4 mt-4"):
+                            ui.label("Account Details").classes("text-sm font-bold text-slate-300 mb-3")
+                            with ui.grid(columns=2).classes("w-full gap-2 text-sm"):
+                                ui.label("Account:").classes("text-slate-400")
+                                ui.label(result.get('name', 'N/A')).classes("text-slate-200")
+                                ui.label("Server:").classes("text-slate-400")
+                                ui.label(result.get('server', 'N/A')).classes("text-slate-200")
+                                ui.label("Leverage:").classes("text-slate-400")
+                                ui.label(f"1:{result.get('leverage', 1)}").classes("text-slate-200")
+                                ui.label("Free Margin:").classes("text-slate-400")
+                                ui.label(f"${result.get('free_margin', 0):,.2f}").classes("text-slate-200")
+                
+                ui.timer(0.1, load_account, once=True)
+            
+            # Positions Tab
+            with ui.tab_panel(positions_tab):
+                positions_content = ui.column().classes("w-full gap-4")
+                
+                async def load_positions():
+                    positions_content.clear()
+                    with positions_content:
+                        ui.label("Loading positions...").classes("text-slate-400")
+                    
+                    result = await asyncio.to_thread(mt5_api.get_positions, "localhost", api_port)
+                    
+                    positions_content.clear()
+                    with positions_content:
+                        if not result.get("success"):
+                            ui.label("Failed to load positions").classes("text-red-400")
+                            return
+                        
+                        positions = result.get("positions", [])
+                        
+                        if not positions:
+                            with ui.column().classes("w-full items-center py-10"):
+                                ui.icon("inbox").classes("text-slate-500 text-4xl mb-2")
+                                ui.label("No open positions").classes("text-slate-400")
+                            return
+                        
+                        # Summary
+                        total_profit = result.get("total_profit", 0)
+                        color = "text-green-400" if total_profit >= 0 else "text-red-400"
+                        with ui.card().classes("glass-card w-full p-4 mb-4"):
+                            with ui.row().classes("w-full justify-between items-center"):
+                                ui.label(f"{len(positions)} Open Positions").classes("text-slate-300 font-medium")
+                                ui.label(f"Total: ${total_profit:,.2f}").classes(f"font-bold {color}")
+                        
+                        # Positions Table
+                        for pos in positions:
+                            profit = pos.get("profit", 0)
+                            profit_color = "text-green-400" if profit >= 0 else "text-red-400"
+                            type_color = "text-blue-400" if pos.get("type") == "BUY" else "text-red-400"
+                            
+                            with ui.card().classes("glass-card w-full p-3"):
+                                with ui.row().classes("w-full justify-between items-center"):
+                                    with ui.row().classes("items-center gap-3"):
+                                        ui.label(pos.get("symbol", "")).classes("font-bold text-slate-100")
+                                        ui.label(pos.get("type", "")).classes(f"text-sm font-medium {type_color}")
+                                        ui.label(f"{pos.get('volume', 0)} lots").classes("text-xs text-slate-400")
+                                    ui.label(f"${profit:,.2f}").classes(f"font-bold {profit_color}")
+                
+                ui.timer(0.1, load_positions, once=True)
+            
+            # History Tab
+            with ui.tab_panel(history_tab):
+                history_content = ui.column().classes("w-full gap-4")
+                
+                async def load_history():
+                    history_content.clear()
+                    with history_content:
+                        ui.label("Loading history...").classes("text-slate-400")
+                    
+                    result = await asyncio.to_thread(mt5_api.get_history, "localhost", api_port, 7)
+                    
+                    history_content.clear()
+                    with history_content:
+                        if not result.get("success"):
+                            ui.label("Failed to load history").classes("text-red-400")
+                            return
+                        
+                        summary = result.get("summary", {})
+                        
+                        # Summary Cards
+                        with ui.row().classes("w-full gap-3"):
+                            with ui.card().classes("glass-card flex-1 p-4"):
+                                ui.label("7-Day P/L").classes("text-xs text-slate-400 uppercase")
+                                profit = summary.get("total_profit", 0)
+                                color = "text-green-400" if profit >= 0 else "text-red-400"
+                                ui.label(f"${profit:,.2f}").classes(f"text-2xl font-bold {color}")
+                            
+                            with ui.card().classes("glass-card flex-1 p-4"):
+                                ui.label("Trades").classes("text-xs text-slate-400 uppercase")
+                                ui.label(str(summary.get("total_trades", 0))).classes("text-2xl font-bold text-blue-400")
+                            
+                            with ui.card().classes("glass-card flex-1 p-4"):
+                                ui.label("Win Rate").classes("text-xs text-slate-400 uppercase")
+                                ui.label(f"{summary.get('win_rate', 0)}%").classes("text-2xl font-bold text-cyan-400")
+                        
+                        with ui.row().classes("w-full gap-3 mt-2"):
+                            with ui.card().classes("bg-green-500/10 border border-green-500/30 flex-1 p-4"):
+                                ui.label("Wins").classes("text-xs text-green-400 uppercase")
+                                ui.label(str(summary.get("wins", 0))).classes("text-xl font-bold text-green-400")
+                            
+                            with ui.card().classes("bg-red-500/10 border border-red-500/30 flex-1 p-4"):
+                                ui.label("Losses").classes("text-xs text-red-400 uppercase")
+                                ui.label(str(summary.get("losses", 0))).classes("text-xl font-bold text-red-400")
+                
+                ui.timer(0.1, load_history, once=True)
 
 async def upload_agent_dialog():
     with ui.dialog() as dialog, ui.card().classes("glass-card min-w-[550px] p-6"):
@@ -484,6 +716,9 @@ async def kill_switch():
 # Logs Drawer with improved styling
 log_drawer = ui.right_drawer(fixed=False).classes("glass-header w-[700px] p-6 scrollbar-thin").props("overlay")
 
+# Trading Drawer for MT5 account/positions/history
+trading_drawer = ui.right_drawer(fixed=False).classes("glass-header w-[800px] p-6 scrollbar-thin").props("overlay")
+
 # Header with glass effect
 with ui.header(elevated=True).classes("glass-header h-20 items-center px-6"):
     with ui.row().classes("w-full max-w-7xl mx-auto items-center"):
@@ -517,13 +752,61 @@ with ui.column().classes("w-full min-h-screen bg-gradient-to-br from-slate-900 v
                 ui.button(icon="refresh", on_click=refresh_containers).props("round flat size=lg").classes("text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10").tooltip("Refresh")
                 ui.button(icon="filter_list").props("round flat size=lg").classes("text-slate-400 hover:text-blue-400 hover:bg-blue-500/10").tooltip("Filter")
 
+        # Search/Filter Row
+        with ui.row().classes("w-full gap-4 mb-4"):
+            search_input = ui.input(placeholder="Search instances...").props("outlined dense dark").classes("flex-1")
+            search_input.on('keyup', lambda e: filter_containers(e.sender.value))
+        
         # Container Grid
         container_grid = ui.grid(columns=1).classes("w-full gap-5 sm:grid-cols-2 xl:grid-cols-3")
-        
-        # Initial Load
-        ui.timer(0.1, refresh_containers, once=True)
-        # Auto-refresh
-        ui.timer(10.0, refresh_containers)
+
+# Dynamic timestamp update
+last_updated_label = None
+
+async def update_timestamp():
+    global last_updated_label
+    # Find and update the timestamp label
+    pass  # NiceGUI handles this in refresh_containers
+
+# Filter function
+def filter_containers(query):
+    """Filters container cards based on search query."""
+    query = query.lower().strip()
+    container_grid.clear()
+    
+    if not containers:
+        with container_grid:
+            create_empty_state()
+        return
+    
+    filtered = [c for c in containers if query in c['name'].lower()] if query else containers
+    
+    if not filtered:
+        with container_grid:
+            with ui.column().classes("w-full items-center py-10 col-span-full"):
+                ui.icon("search_off").classes("text-slate-500 text-4xl mb-2")
+                ui.label(f"No instances matching '{query}'").classes("text-slate-400")
+        return
+    
+    with container_grid:
+        for i, c in enumerate(filtered):
+            create_container_card(c, i)
+
+# Keyboard Shortcuts
+ui.keyboard(on_key=lambda e: handle_keyboard(e))
+
+async def handle_keyboard(e):
+    """Handle keyboard shortcuts."""
+    if e.action.keydown:
+        if e.key.lower() == 'r' and not e.modifiers.ctrl:
+            await refresh_containers()
+        elif e.key.lower() == 'n' and not e.modifiers.ctrl:
+            await create_instance_dialog()
+
+# Initial Load
+ui.timer(0.1, refresh_containers, once=True)
+# Auto-refresh every 10 seconds
+ui.timer(10.0, refresh_containers)
 
 # Run
 ui.run(title="MT5 Manager", port=8080, favicon="📈", dark=True, reload=False)
