@@ -1,0 +1,6 @@
+@echo off
+echo Building MT5 Manager...
+docker compose build mt5_manager
+echo Starting MT5 Manager...
+docker compose up -d mt5_manager
+echo Done! Open http://localhost:5800 in your browser.
